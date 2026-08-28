@@ -6,13 +6,16 @@ import { SessionsView } from './ui/sessions/SessionsView';
 import { ResearchView } from './ui/research/ResearchView';
 import { DevicesView } from './ui/devices/DevicesView';
 import { SettingsView } from './ui/settings/SettingsView';
+import { EngineeringModal } from './ui/engineering/EngineeringModal';
+import { CompatibilityModal } from './ui/components/CompatibilityModal';
 
-import { AudioCaptureEngine } from './audio/AudioCaptureEngine';
+import { LiveMediaStreamSource, SimulatedDemoSource, DopplerSource } from './audio/DopplerSource';
 import { AudioRingBuffer } from './audio/AudioRingBuffer';
 import { FhrEstimator } from './fhr/FhrEstimator';
 import { PcmWriter } from './recording/PcmWriter';
 import { SpectrogramEngine } from './dsp/Spectrogram';
 import { SessionRepository } from './storage/SessionRepository';
+import { Logger } from './domain/Logger';
 
 import {
   DspConfiguration,
@@ -28,6 +31,14 @@ export const App: React.FC = () => {
   const [isCapturing, setIsCapturing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+
+  // Modals
+  const [isEngineeringOpen, setIsEngineeringOpen] = useState(false);
+  const [isCompatibilityOpen, setIsCompatibilityOpen] = useState(false);
+
+  // Demo Simulation Mode
+  const [isDemoMode, setIsDemoMode] = useState(false);
+  const [demoBpm, setDemoBpm] = useState(140);
 
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
   const [activeDeviceLabel, setActiveDeviceLabel] = useState<string>('No Audio Device');
@@ -49,10 +60,12 @@ export const App: React.FC = () => {
   });
 
   const [estimation, setEstimation] = useState<FhrEstimationResult | null>(null);
+  const [lastValidEstimateTime, setLastValidEstimateTime] = useState<number | null>(null);
 
   // Engine references
-  const captureEngineRef = useRef<AudioCaptureEngine>(new AudioCaptureEngine());
-  const ringBufferRef = useRef<AudioRingBuffer>(new AudioRingBuffer(44100 * 5)); // 5s buffer
+  const liveSourceRef = useRef<LiveMediaStreamSource>(new LiveMediaStreamSource());
+  const demoSourceRef = useRef<SimulatedDemoSource>(new SimulatedDemoSource(140));
+  const ringBufferRef = useRef<AudioRingBuffer>(new AudioRingBuffer(44100 * 6)); // 6s buffer (with pre-roll)
   const estimatorRef = useRef<FhrEstimator>(new FhrEstimator(44100, dspConfig));
   const pcmWriterRef = useRef<PcmWriter>(new PcmWriter());
   const spectrogramEngineRef = useRef<SpectrogramEngine>(new SpectrogramEngine(512, 256, 44100));
@@ -60,6 +73,8 @@ export const App: React.FC = () => {
   const currentSessionIdRef = useRef<string | null>(null);
   const sessionStartTimeRef = useRef<number>(0);
   const recordingTimerRef = useRef<any>(null);
+
+  const activeSource: DopplerSource = isDemoMode ? demoSourceRef.current : liveSourceRef.current;
 
   // Periodic estimation loop (every 120ms)
   useEffect(() => {
@@ -82,6 +97,10 @@ export const App: React.FC = () => {
             setEstimation(result);
             setMetrics(m);
 
+            if (result.estimatedBpm) {
+              setLastValidEstimateTime(Date.now());
+            }
+
             // Compute spectrogram frame
             const frame = spectrogramEngineRef.current.computeSingleFrame(windowSamples);
             setLiveSpectrogramFrames((prev) => {
@@ -99,41 +118,48 @@ export const App: React.FC = () => {
     return () => cancelAnimationFrame(animId);
   }, [isCapturing]);
 
-  // Hook up audio capture chunk receiver
-  useEffect(() => {
-    const unsubscribe = captureEngineRef.current.subscribeChunks((chunk) => {
-      ringBufferRef.current.write(chunk);
-      if (isRecording) {
-        pcmWriterRef.current.appendChunk(chunk);
-      }
-    });
-
-    return () => unsubscribe();
-  }, [isRecording]);
-
   const handleToggleCapture = useCallback(async () => {
     if (isCapturing) {
       if (isRecording) {
         await handleStopRecording();
       }
-      await captureEngineRef.current.stop();
+      await activeSource.stop();
       setIsCapturing(false);
       estimatorRef.current.reset();
       setEstimation(null);
+      Logger.info(`Capture stopped (${activeSource.name})`);
     } else {
       try {
-        const verified = await captureEngineRef.current.start(activeDeviceId || undefined);
-        setTrackSettings(verified);
-        estimatorRef.current.setSampleRate(captureEngineRef.current.sampleRate);
-        setIsCapturing(true);
+        if (!isDemoMode && activeDeviceId) {
+          liveSourceRef.current.setDeviceId(activeDeviceId);
+        }
 
-        const label = verified.isExternalInput ? 'USB Audio Interface' : 'Built-in Audio Track';
-        setActiveDeviceLabel(label);
+        const verified = await activeSource.start((chunk) => {
+          ringBufferRef.current.write(chunk);
+          if (isRecording) {
+            pcmWriterRef.current.appendChunk(chunk);
+          }
+        });
+
+        if (verified) {
+          setTrackSettings(verified);
+          estimatorRef.current.setSampleRate(activeSource.sampleRate);
+          const label = isDemoMode
+            ? 'Simulated Doppler Pulse Generator'
+            : verified.isExternalInput
+            ? 'USB Audio Interface'
+            : 'Built-in Audio Track';
+          setActiveDeviceLabel(label);
+        }
+
+        setIsCapturing(true);
+        Logger.info(`Capture started on ${activeSource.name} @ ${activeSource.sampleRate} Hz`);
       } catch (err: any) {
+        Logger.error(`Failed to start capture: ${err.message || err}`);
         alert('Could not start audio capture: ' + (err.message || err));
       }
     }
-  }, [isCapturing, isRecording, activeDeviceId]);
+  }, [isCapturing, isRecording, isDemoMode, activeDeviceId, activeSource]);
 
   const handleStartRecording = async () => {
     const sessionId = 'sess_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
@@ -142,7 +168,15 @@ export const App: React.FC = () => {
     setRecordingSeconds(0);
 
     await pcmWriterRef.current.initSession(sessionId);
+
+    // Pre-roll: write existing buffered audio (last 2 seconds) to recording
+    const preRoll = ringBufferRef.current.readLatest(activeSource.sampleRate * 2);
+    if (preRoll.length > 0) {
+      await pcmWriterRef.current.appendChunk(preRoll);
+    }
+
     setIsRecording(true);
+    Logger.info(`Started recording session [${sessionId}] with pre-roll`);
 
     recordingTimerRef.current = setInterval(() => {
       setRecordingSeconds((prev) => prev + 1);
@@ -159,7 +193,7 @@ export const App: React.FC = () => {
     const endTime = Date.now();
     const durationMs = endTime - startTime;
 
-    const sampleRate = captureEngineRef.current.sampleRate;
+    const sampleRate = activeSource.sampleRate;
     const { wavBlob, byteLength } = await pcmWriterRef.current.finalize(sampleRate);
 
     const session: SessionMetadata = {
@@ -185,6 +219,7 @@ export const App: React.FC = () => {
 
     await SessionRepository.saveSession(session, wavBlob);
     pcmWriterRef.current.clear();
+    Logger.info(`Finalized recording [${sessionId}]: ${(byteLength / 1024 / 1024).toFixed(2)} MB WAV saved`);
   };
 
   const handleToggleRecord = () => {
@@ -197,21 +232,37 @@ export const App: React.FC = () => {
 
   const handleAddMarker = async (label: string) => {
     if (!currentSessionIdRef.current) return;
-    await SessionRepository.addMarker({
+    const marker = {
       id: 'marker_' + Date.now(),
       sessionId: currentSessionIdRef.current,
       timestampMs: Date.now() - sessionStartTimeRef.current,
-      type: 'user',
+      type: 'user' as const,
       label,
-    });
+    };
+    await SessionRepository.addMarker(marker);
+    Logger.info(`User marker added: "${label}" @ ${(marker.timestampMs / 1000).toFixed(1)}s`);
   };
 
   const handleUpdateDspConfig = (newConfig: Partial<DspConfiguration>) => {
     setDspConfig((prev) => {
       const updated = { ...prev, ...newConfig };
       estimatorRef.current.updateConfig(updated);
+      Logger.info(`DSP configuration updated: ${JSON.stringify(newConfig)}`);
       return updated;
     });
+  };
+
+  const handleToggleDemoMode = async (enabled: boolean) => {
+    if (isCapturing) {
+      await handleToggleCapture();
+    }
+    setIsDemoMode(enabled);
+    Logger.info(`Demo Mode ${enabled ? 'ENABLED' : 'DISABLED'}`);
+  };
+
+  const handleSetDemoBpm = (bpm: number) => {
+    setDemoBpm(bpm);
+    demoSourceRef.current.setBpm(bpm);
   };
 
   return (
@@ -219,7 +270,10 @@ export const App: React.FC = () => {
       <Navbar
         isCapturing={isCapturing}
         isRecording={isRecording}
+        isDemoMode={isDemoMode}
         activeDeviceLabel={activeDeviceLabel}
+        onOpenEngineering={() => setIsEngineeringOpen(true)}
+        onOpenCompatibility={() => setIsCompatibilityOpen(true)}
       />
 
       <main className="flex-1 overflow-y-auto">
@@ -229,7 +283,7 @@ export const App: React.FC = () => {
             isRecording={isRecording}
             recordingDurationSeconds={recordingSeconds}
             waveformSamples={waveformSamples}
-            sampleRate={captureEngineRef.current.sampleRate}
+            sampleRate={activeSource.sampleRate}
             metrics={metrics}
             estimation={estimation}
             trackSettings={trackSettings}
@@ -249,19 +303,43 @@ export const App: React.FC = () => {
           <DevicesView
             activeDeviceId={activeDeviceId}
             trackSettings={trackSettings}
-            onSelectDevice={(id) => setActiveDeviceId(id)}
+            onSelectDevice={(id) => {
+              setActiveDeviceId(id);
+              Logger.info(`Device selected: ${id}`);
+            }}
           />
         )}
 
         {activeTab === 'settings' && (
           <SettingsView
             config={dspConfig}
+            isDemoMode={isDemoMode}
+            demoBpm={demoBpm}
             onUpdateConfig={handleUpdateDspConfig}
+            onToggleDemoMode={handleToggleDemoMode}
+            onSetDemoBpm={handleSetDemoBpm}
           />
         )}
       </main>
 
       <BottomNav activeTab={activeTab} onSelectTab={(tab) => setActiveTab(tab)} />
+
+      {/* Modals */}
+      <EngineeringModal
+        isOpen={isEngineeringOpen}
+        onClose={() => setIsEngineeringOpen(false)}
+        isCapturing={isCapturing}
+        sampleRate={activeSource.sampleRate}
+        trackSettings={trackSettings}
+        metrics={metrics}
+        dspConfig={dspConfig}
+        lastValidEstimateTimeMs={lastValidEstimateTime}
+      />
+
+      <CompatibilityModal
+        isOpen={isCompatibilityOpen}
+        onClose={() => setIsCompatibilityOpen(false)}
+      />
     </div>
   );
 };
