@@ -47,6 +47,12 @@ npm run build
 
 ---
 
+## 💌 Author's Note
+
+I built this platform but never got to use it in practice. If someone ever gets to test this with real Doppler audio, please feel free to drop me a message or open an issue on GitHub—I would love to hear how it works for you!
+
+---
+
 ## 🔒 Safety & Disclaimer
 
 This software is strictly an experimental research and signal-monitoring tool. It is **not** a medical device, does not provide clinical diagnoses, and does not determine fetal wellbeing. "Signal Quality" refers solely to audio capture fidelity.

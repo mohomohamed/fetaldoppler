@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { DspConfiguration, DEFAULT_DSP_CONFIG } from '../../domain/types';
 import { SessionRepository } from '../../storage/SessionRepository';
-import { Settings, Shield, HardDrive, Cpu, RefreshCcw, Sparkles, Trash2 } from 'lucide-react';
+import { Settings, Shield, HardDrive, Cpu, RefreshCcw, Sparkles, Trash2, MessageSquareHeart } from 'lucide-react';
 
 interface SettingsViewProps {
   config: DspConfiguration;
@@ -222,6 +222,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
         <p className="text-[11px] text-zinc-400 leading-relaxed">
           Doppler PWA is an experimental digital signal processing research platform. Derived FHR measurements are mathematical approximations and must never be interpreted as medical determinations of fetal wellbeing, distress, or clinical normality.
+        </p>
+      </div>
+
+      {/* Personal Note from Author */}
+      <div className="rounded-2xl border border-cyan-500/30 bg-gradient-to-r from-cyan-950/40 via-zinc-900/50 to-purple-950/30 p-4 space-y-2 shadow-sm">
+        <div className="flex items-center space-x-2 text-cyan-300">
+          <MessageSquareHeart className="h-4 w-4 text-cyan-400" />
+          <span className="text-xs font-semibold uppercase tracking-wider">Author's Note</span>
+        </div>
+        <p className="text-xs text-zinc-300 leading-relaxed">
+          I built this software platform but never got to use it in practice. If someone ever gets to test this with real Doppler audio, please feel free to drop me a message or share feedback—I would love to hear how it works for you!
         </p>
       </div>
     </div>
