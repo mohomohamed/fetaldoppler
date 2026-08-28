@@ -28,6 +28,9 @@ lerna-debug.log*
 !.vscode/extensions.json
 !.vscode/settings.json
 
+# Playwright MCP
+.playwright-mcp
+
 # Environment variables
 .env
 .env.local
